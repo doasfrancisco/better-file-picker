@@ -12,6 +12,9 @@
 #
 # Phase 1: Index (cached, rebuilds every 300s)
 #   git ls-files across all repos → index.txt (files) + dirs.txt (directories).
+#   Each repo indexes both tracked files (git ls-files) AND untracked files
+#   (git ls-files --others --exclude-standard) so new files appear in @ search
+#   before they're committed. .gitignore is still respected.
 #   Sub-repos discovered via .gitignore + .git check. Repos with .meta-repo
 #   marker get recursive sub-repo indexing. All sub-repos indexed in parallel.
 #   All git commands use -C PROJECT_ROOT to ensure correct scope.
@@ -45,8 +48,8 @@ build_index() {
   mkdir -p "$TMPOUT"
   rm -f "$TMPOUT"/*
 
-  # 1. Root repo tracked files (always from project root, not pwd)
-  git -C "$PROJECT_ROOT" ls-files 2>/dev/null > "$TMPOUT/root"
+  # 1. Root repo files (always from project root, not pwd)
+  git -C "$PROJECT_ROOT" ls-files --cached --others --exclude-standard 2>/dev/null > "$TMPOUT/root"
 
   # 2. Find ignored sub-repos (paths relative to PROJECT_ROOT)
   repos=()
@@ -60,13 +63,13 @@ build_index() {
   for dir in "${repos[@]}"; do
     (
       {
-        git -C "$PROJECT_ROOT/$dir" ls-files 2>/dev/null | sed "s|^|$dir/|"
+        git -C "$PROJECT_ROOT/$dir" ls-files --cached --others --exclude-standard 2>/dev/null | sed "s|^|$dir/|"
         # If sub-repo is a meta-repo, index its nested repos too
         [ -f "$PROJECT_ROOT/$dir/.meta-repo" ] || exit 0
         while read -r subdir; do
           subdir="${subdir%/}"
           [ -d "$PROJECT_ROOT/$dir/$subdir/.git" ] || continue
-          git -C "$PROJECT_ROOT/$dir/$subdir" ls-files 2>/dev/null | sed "s|^|$dir/$subdir/|"
+          git -C "$PROJECT_ROOT/$dir/$subdir" ls-files --cached --others --exclude-standard 2>/dev/null | sed "s|^|$dir/$subdir/|"
         done < <(git -C "$PROJECT_ROOT/$dir" ls-files --others --ignored --exclude-standard 2>/dev/null)
       } > "$TMPOUT/$(echo "$dir" | tr '/' '_')"
     ) &
