@@ -1,6 +1,18 @@
 #!/bin/bash
 # Custom @ file picker for meta-repo with nested git repos.
 #
+# === v3: EXPERIMENTAL — uses rg (ripgrep) instead of git ls-files ===
+#
+# Slower than v2 because Claude's rg is a shell function wrapping claude.exe,
+# not real ripgrep. Each spawn has claude.exe overhead.
+#
+# FUTURE IDEA: a single `rg --files --hidden --no-ignore` from root could list
+# ALL files across ALL sub-repos in one process spawn. Then prune results using
+# each sub-repo's .gitignore rules in post-processing. This would eliminate the
+# 75+ process spawns entirely — one rg call instead of 75 git calls.
+# Blocked by: need real ripgrep binary (not Claude's wrapper), and a way to
+# apply per-repo .gitignore rules to the flat file list.
+#
 # === ALGORITHM ===
 #
 # Phase 0: Project root resolution
@@ -11,17 +23,16 @@
 #   known working directory bug on Windows.
 #
 # Phase 1: Index (cached, rebuilds every 300s)
-#   Recursive index_repo(dir, prefix):
-#     1. git ls-files --cached --others --exclude-standard → tracked + untracked files
-#        (saved to variable for reuse in step 2)
-#     2. If dir has .meta-repo marker:
-#        2.1 git ls-files --others --ignored --exclude-standard → find ignored paths
-#        2.2 For each entry ending in / (git collapses dirs with .git that aren't
-#            in the parent index — so trailing / = sub-repo):
-#            2.2.1 If dir not already covered by step 1 → index_repo() (recurse)
-#   Sub-repos indexed in parallel. All paths prefixed for correct nesting.
+#   Iterative BFS:
+#     1. git ls-files --cached --others --exclude-standard → root repo files
+#     2. If root has .meta-repo → queue it
+#     3. While queue not empty:
+#        3.1 git ls-files --others --ignored --exclude-standard → discover sub-repos
+#            (entries ending in / = dirs with .git not in parent index)
+#        3.2 For each sub-repo (parallel):
+#            - git ls-files → list its files
+#            - If .meta-repo → queue for next iteration
 #   Outputs index.txt (files) + dirs.txt (directories).
-#   All git commands use -C to ensure correct scope.
 #
 # Phase 2: Search (every keystroke)
 #
@@ -37,52 +48,53 @@
 #   Tiers 2-5 fill remaining slots with broader matches.
 #
 
+# Export rg for subshells (Claude Code defines it as a shell function)
+type rg &>/dev/null && export -f rg
+
 PROJECT_ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-PROJECT_HASH=$(echo "$PROJECT_ROOT" | md5sum | cut -d' ' -f1)
-CACHE_DIR="${TMPDIR:-/tmp}/claude-file-suggestion-${PROJECT_HASH}"
+CACHE_DIR="${TMPDIR:-/tmp}/claude-file-suggestion-$(echo "$PROJECT_ROOT" | md5sum | cut -d' ' -f1)"
 CACHE_FILE="$CACHE_DIR/index.txt"
 CACHE_DIRS="$CACHE_DIR/dirs.txt"
-CACHE_LOCK="$CACHE_DIR/lock"
 CACHE_TTL=300
 
 mkdir -p "$CACHE_DIR"
 
-# Recursive: list files for a repo, then discover sub-repos if meta-repo
-# Usage: index_repo <absolute_dir> <prefix>
-#   Writes to stdout: prefixed file paths
-index_repo() {
-  local dir="$1" prefix="$2"
-
-  # 1. List tracked + untracked files (save for reuse in step 2)
-  local files
-  files=$(git -C "$dir" ls-files --cached --others --exclude-standard 2>/dev/null)
-  echo "$files" | sed "s|^|$prefix|"
-
-  # 2. If meta-repo, find ignored sub-repos and recurse
-  [ -f "$dir/.meta-repo" ] || return 0
-  while read -r entry; do
-    # Only entries ending in / (git collapses dirs with .git not in index)
-    [[ "$entry" == */ ]] || continue
-    local sub="${entry%/}"
-    # Skip if already covered by step 1
-    echo "$files" | grep -q "^${sub}/" && continue
-    index_repo "$dir/$sub" "$prefix$sub/" &
-  done < <(git -C "$dir" ls-files --others --ignored --exclude-standard 2>/dev/null)
-  wait
-}
-
 build_index() {
-  TMPOUT="$CACHE_DIR/parts"
-  mkdir -p "$TMPOUT"
-  rm -f "$TMPOUT"/*
+  local parts="$CACHE_DIR/parts"
+  mkdir -p "$parts"
+  rm -f "$parts"/*
 
-  index_repo "$PROJECT_ROOT" "" > "$TMPOUT/all"
+  # 1. Root repo files (rg: faster than git, no git startup overhead)
+  local rootlen=$(( ${#PROJECT_ROOT} + 2 ))
+  rg --files --hidden -g '!.git' "$PROJECT_ROOT" 2>/dev/null | cut -c${rootlen}- | tr '\134' '/' > "$parts/root"
 
-  # Merge and sort
-  sort "$TMPOUT/all" > "$CACHE_FILE.tmp"
-  rm -rf "$TMPOUT"
+  # 2-3. BFS: discover and index sub-repos in meta-repos
+  local queue=() next=()
+  [ -f "$PROJECT_ROOT/.meta-repo" ] && queue+=("|$PROJECT_ROOT")
 
-  # Pre-compute unique directories
+  while [ ${#queue[@]} -gt 0 ]; do
+    next=()
+    for item in "${queue[@]}"; do
+      local prefix="${item%%|*}" dir="${item#*|}"
+      while read -r entry; do
+        [[ "$entry" == */ ]] || continue
+        local sub="${entry%/}"
+        (
+          local subdir="$dir/$sub"
+          local sublen=$(( ${#subdir} + 2 ))
+          rg --files --hidden -g '!.git' "$subdir" 2>/dev/null \
+            | cut -c${sublen}- | tr '\134' '/' \
+            | sed "s|^|${prefix}${sub}/|" > "$parts/$(echo "${prefix}${sub}" | tr '/' '_')"
+        ) &
+        [ -f "$dir/$sub/.meta-repo" ] && next+=("${prefix}${sub}/|$dir/$sub")
+      done < <(git -C "$dir" ls-files --others --ignored --exclude-standard 2>/dev/null)
+    done
+    wait
+    queue=("${next[@]}")
+  done
+
+  cat "$parts"/* 2>/dev/null | sort > "$CACHE_FILE.tmp"
+  rm -rf "$parts"
   grep '/' "$CACHE_FILE.tmp" | sed 's|/[^/]*$||' | sort -u | sed 's|$|/|' > "$CACHE_DIRS.tmp"
   mv "$CACHE_FILE.tmp" "$CACHE_FILE"
   mv "$CACHE_DIRS.tmp" "$CACHE_DIRS"

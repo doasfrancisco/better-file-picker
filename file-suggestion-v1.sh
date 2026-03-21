@@ -11,17 +11,13 @@
 #   known working directory bug on Windows.
 #
 # Phase 1: Index (cached, rebuilds every 300s)
-#   Recursive index_repo(dir, prefix):
-#     1. git ls-files --cached --others --exclude-standard → tracked + untracked files
-#        (saved to variable for reuse in step 2)
-#     2. If dir has .meta-repo marker:
-#        2.1 git ls-files --others --ignored --exclude-standard → find ignored paths
-#        2.2 For each entry ending in / (git collapses dirs with .git that aren't
-#            in the parent index — so trailing / = sub-repo):
-#            2.2.1 If dir not already covered by step 1 → index_repo() (recurse)
-#   Sub-repos indexed in parallel. All paths prefixed for correct nesting.
-#   Outputs index.txt (files) + dirs.txt (directories).
-#   All git commands use -C to ensure correct scope.
+#   git ls-files across all repos → index.txt (files) + dirs.txt (directories).
+#   Each repo indexes both tracked files (git ls-files) AND untracked files
+#   (git ls-files --others --exclude-standard) so new files appear in @ search
+#   before they're committed. .gitignore is still respected.
+#   Sub-repos discovered via .gitignore + .git check. Repos with .meta-repo
+#   marker get recursive sub-repo indexing. All sub-repos indexed in parallel.
+#   All git commands use -C PROJECT_ROOT to ensure correct scope.
 #
 # Phase 2: Search (every keystroke)
 #
@@ -47,39 +43,41 @@ CACHE_TTL=300
 
 mkdir -p "$CACHE_DIR"
 
-# Recursive: list files for a repo, then discover sub-repos if meta-repo
-# Usage: index_repo <absolute_dir> <prefix>
-#   Writes to stdout: prefixed file paths
-index_repo() {
-  local dir="$1" prefix="$2"
-
-  # 1. List tracked + untracked files (save for reuse in step 2)
-  local files
-  files=$(git -C "$dir" ls-files --cached --others --exclude-standard 2>/dev/null)
-  echo "$files" | sed "s|^|$prefix|"
-
-  # 2. If meta-repo, find ignored sub-repos and recurse
-  [ -f "$dir/.meta-repo" ] || return 0
-  while read -r entry; do
-    # Only entries ending in / (git collapses dirs with .git not in index)
-    [[ "$entry" == */ ]] || continue
-    local sub="${entry%/}"
-    # Skip if already covered by step 1
-    echo "$files" | grep -q "^${sub}/" && continue
-    index_repo "$dir/$sub" "$prefix$sub/" &
-  done < <(git -C "$dir" ls-files --others --ignored --exclude-standard 2>/dev/null)
-  wait
-}
-
 build_index() {
   TMPOUT="$CACHE_DIR/parts"
   mkdir -p "$TMPOUT"
   rm -f "$TMPOUT"/*
 
-  index_repo "$PROJECT_ROOT" "" > "$TMPOUT/all"
+  # 1. Root repo files (always from project root, not pwd)
+  git -C "$PROJECT_ROOT" ls-files --cached --others --exclude-standard 2>/dev/null > "$TMPOUT/root"
 
-  # Merge and sort
-  sort "$TMPOUT/all" > "$CACHE_FILE.tmp"
+  # 2. Find ignored sub-repos (paths relative to PROJECT_ROOT)
+  repos=()
+  while read -r dir; do
+    dir="${dir%/}"
+    [ -d "$PROJECT_ROOT/$dir/.git" ] || continue
+    repos+=("$dir")
+  done < <(git -C "$PROJECT_ROOT" ls-files --others --ignored --exclude-standard 2>/dev/null)
+
+  # 3. Index all sub-repos in parallel
+  for dir in "${repos[@]}"; do
+    (
+      {
+        git -C "$PROJECT_ROOT/$dir" ls-files --cached --others --exclude-standard 2>/dev/null | sed "s|^|$dir/|"
+        # If sub-repo is a meta-repo, index its nested repos too
+        [ -f "$PROJECT_ROOT/$dir/.meta-repo" ] || exit 0
+        while read -r subdir; do
+          subdir="${subdir%/}"
+          [ -d "$PROJECT_ROOT/$dir/$subdir/.git" ] || continue
+          git -C "$PROJECT_ROOT/$dir/$subdir" ls-files --cached --others --exclude-standard 2>/dev/null | sed "s|^|$dir/$subdir/|"
+        done < <(git -C "$PROJECT_ROOT/$dir" ls-files --others --ignored --exclude-standard 2>/dev/null)
+      } > "$TMPOUT/$(echo "$dir" | tr '/' '_')"
+    ) &
+  done
+  wait
+
+  # Merge all parts
+  cat "$TMPOUT"/* 2>/dev/null | sort > "$CACHE_FILE.tmp"
   rm -rf "$TMPOUT"
 
   # Pre-compute unique directories
