@@ -1,6 +1,15 @@
 #!/bin/bash
 # Custom @ file picker for meta-repo with nested git repos.
 #
+# === NOTES ===
+#
+# TTL and lock timeout could be dynamic based on cache size / repo count.
+# Small projects (few files, this repo) should refresh faster — a new file
+# should appear immediately. Large meta-repos (75+ sub-repos, 8s build)
+# benefit from longer TTL to avoid constant rebuilds.
+# Current: TTL=60s, lock_timeout=75s — fixed for all projects.
+#
+#
 # === ALGORITHM ===
 #
 # Phase 0: Project root resolution
