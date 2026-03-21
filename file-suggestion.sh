@@ -130,8 +130,10 @@ for (( i=0; i<${#query}; i++ )); do
   fi
 done
 
-# Sort helper: by depth, files before dirs at same depth
-by_depth() { awk -F/ '{d=($0 ~ /\/$/) ? 1 : 0; print NF, d, $0}' | sort -n -k1 -k2 | cut -d' ' -f3-; }
+# Sort helper: by depth, dirs before files at same depth.
+# Dirs first so browsable folder entries aren't pushed out by their own
+# children when head -10 truncates the tier (e.g. whatsapp/ vs whatsapp/*.js).
+by_depth() { awk -F/ '{d=($0 ~ /\/$/) ? 0 : 1; print NF, d, $0}' | sort -n -k1 -k2 | cut -d' ' -f3-; }
 
 {
   # Tier 1: if query matches a dir, list its immediate contents from cache

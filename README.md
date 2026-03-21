@@ -2,6 +2,11 @@
 
 Custom `@` file picker for Claude Code that indexes meta-repos with nested git repos.
 
+## Dependencies
+
+- `git` — file listing and sub-repo discovery
+- `jq` — parses JSON query from Claude Code stdin. Could be replaced with pure bash to remove the dependency.
+
 ## Algorithm
 
 Recursive `index_repo(dir, prefix)`:
