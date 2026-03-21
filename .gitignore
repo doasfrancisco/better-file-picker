@@ -1,0 +1,3 @@
+*.stackdump
+compare.sh
+.claude/settings.local.json
