@@ -39,7 +39,7 @@
 
 PROJECT_ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PROJECT_HASH=$(echo "$PROJECT_ROOT" | md5sum | cut -d' ' -f1)
-CACHE_DIR="${TMPDIR:-/tmp}/claude-file-suggestion-${PROJECT_HASH}"
+CACHE_DIR="$HOME/.cache-better-file-picker/${PROJECT_HASH}"
 CACHE_FILE="$CACHE_DIR/index.txt"
 CACHE_DIRS="$CACHE_DIR/dirs.txt"
 CACHE_LOCK="$CACHE_DIR/lock"
