@@ -90,7 +90,8 @@ build_index() {
 
 # Build cache if missing or stale (always non-blocking)
 if [ ! -f "$CACHE_FILE" ]; then
-  build_index &
+  build_index &>/dev/null &
+  disown
 elif [ -f "$CACHE_FILE" ]; then
   age=$(( $(date +%s) - $(date -r "$CACHE_FILE" +%s 2>/dev/null || echo 0) ))
   # Remove stale lock (process died before cleanup)
@@ -100,7 +101,8 @@ elif [ -f "$CACHE_FILE" ]; then
   fi
   if [ "$age" -gt "$CACHE_TTL" ] && ! [ -f "$CACHE_LOCK" ]; then
     touch "$CACHE_LOCK"
-    ( build_index; rm -f "$CACHE_LOCK" ) &
+    ( build_index; rm -f "$CACHE_LOCK" ) &>/dev/null &
+    disown
   fi
 fi
 
