@@ -98,3 +98,13 @@ From git source (`git/git`):
 | Index 75 sub-repos (parallel, `ls-files`) | ~7.5s | **Bottleneck** — process spawn overhead |
 
 Each `git` process takes ~100ms on Windows just to start (load exe, init config, read index). 75 processes in parallel still takes ~7.5s total wall time.
+
+## Possible future features
+
+### Show gitignored files (not folders)
+
+Currently `git ls-files --cached --others --exclude-standard` respects `.gitignore`, so files like `signal-dev/dashboard.html` (gitignored) don't appear in `@` search. But sometimes you want to find files that are gitignored — just not the folders (like `node_modules/`, `.venv/`).
+
+Approach: add `git ls-files --others --ignored --exclude-standard --directory` per repo. The `--directory` flag collapses ignored folders into `dir/` entries (e.g. `node_modules/`, `.venv/`, `__pycache__/`) while keeping ignored files as individual entries (e.g. `dashboard.html`, `.env`, `context.md`). Filter out entries ending in `/` to get only the files. Merge with existing output.
+
+Trade-off: adds one more `git ls-files` call per repo (75 more process spawns on cold build). Could be combined with the existing call if git supports it, but `--cached --others` and `--ignored` are somewhat mutually exclusive modes. Also exposes `.env` and other sensitive files in search results — may need a secondary exclude list.
