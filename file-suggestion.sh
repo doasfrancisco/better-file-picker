@@ -138,12 +138,14 @@ done
 by_depth() { awk -F/ '{d=($0 ~ /\/$/) ? 0 : 1; print NF, d, $0}' | sort -n -k1 -k2 | cut -d' ' -f3-; }
 
 {
-  # Tier 1: if query matches a dir, list its immediate contents from cache
+  # Tier 1: if query matches a dir, show it + limited children (cap 3 so
+  # matches from other repos aren't pushed out of the 15-result limit)
   top_dir=$(grep -iE "(^|/)$query[^/]*/$" "$CACHE_DIRS" 2>/dev/null | by_depth | head -1)
   if [ -n "$top_dir" ]; then
     echo "$top_dir"
-    grep -E "^${top_dir}[^/]+$" "$CACHE_FILE" 2>/dev/null
-    grep -E "^${top_dir}[^/]+/$" "$CACHE_DIRS" 2>/dev/null
+    { grep -E "^${top_dir}[^/]+/$" "$CACHE_DIRS" 2>/dev/null
+      grep -E "^${top_dir}[^/]+$" "$CACHE_FILE" 2>/dev/null
+    } | head -3
   fi
 
   # Tier 2: exact prefix match on segment
