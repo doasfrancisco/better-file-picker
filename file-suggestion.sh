@@ -90,8 +90,12 @@ build_index() {
 
 # Build cache if missing or stale (always non-blocking)
 if [ ! -f "$CACHE_FILE" ]; then
-  build_index &>/dev/null &
-  disown
+  # Use lock to prevent multiple cold-start builds stacking up
+  if ! [ -f "$CACHE_LOCK" ]; then
+    touch "$CACHE_LOCK"
+    ( build_index; rm -f "$CACHE_LOCK" ) &>/dev/null &
+    disown
+  fi
 elif [ -f "$CACHE_FILE" ]; then
   age=$(( $(date +%s) - $(date -r "$CACHE_FILE" +%s 2>/dev/null || echo 0) ))
   # Remove stale lock (process died before cleanup)
@@ -110,6 +114,12 @@ query=$(cat | jq -r '.query // ""')
 
 if [ -z "$query" ]; then
   ls -1p "$PROJECT_ROOT" | head -15
+  exit 0
+fi
+
+# If cache doesn't exist yet, serve partial results from ls
+if [ ! -f "$CACHE_FILE" ]; then
+  ls -1p "$PROJECT_ROOT" | grep -i "$query" | head -15
   exit 0
 fi
 
