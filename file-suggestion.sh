@@ -25,16 +25,17 @@
 #
 # Phase 2: Search (every keystroke)
 #
-#   Tiered grep on cache. Each tier is fuzzier than the last:
-#     Tier 1: dir match → list ALL immediate children from cache (dir + files + subdirs)
+#   Single awk process loads dirs.txt + index.txt into memory, then runs
+#   all 5 tiers in one pass (no subprocess spawns per tier).
+#   Total query time must stay ≤0.5s on Windows — Claude Code drops results
+#   from slow commands, so the file picker appears broken if search is slow.
+#     Tier 1: dir match → shallowest dir + ≤3 children (skip if depth >4)
 #     Tier 2: exact prefix on segment      (e.g. "cata" → catafract/CLAUDE.md)  10
 #     Tier 3: segment fuzzy                (c[^/]*a[^/]*t[^/]*a)                10
 #     Tier 4: substring anywhere           (literal "cata" in path)              8
-#     Tier 5: global fuzzy across segments (c.*a.*t.*a, crosses /)               8
-#   All results concatenated, deduped (first occurrence wins), head -15.
-#
-#   Tier 1 guarantees all subdirs of the matched directory always show.
-#   Tiers 2-5 fill remaining slots with broader matches.
+#     Tier 5: global fuzzy across segments (c.*a.*t.*a, crosses /)      remaining
+#   Dedup via seen[] array, emit() stops at 15 results.
+#   Dirs scanned before files in each tier so folders appear first.
 #
 
 PROJECT_ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -142,37 +143,88 @@ for (( i=0; i<${#query}; i++ )); do
   fi
 done
 
-# Sort helper: by depth, dirs before files at same depth.
-# Dirs first so browsable folder entries aren't pushed out by their own
-# children when head -10 truncates the tier (e.g. whatsapp/ vs whatsapp/*.js).
-by_depth() { awk -F/ '{d=($0 ~ /\/$/) ? 0 : 1; print NF, d, $0}' | sort -n -k1 -k2 | cut -d' ' -f3-; }
+# Single awk pass: reads dirs.txt + index.txt once, runs all 5 tiers in
+# memory, deduplicates, and outputs ≤15 results.  Replaces ~15 process
+# spawns (grep|sort|cut per tier) with 1 awk process — critical on Windows
+# where process creation is expensive (~2.5s → target <0.5s).
+awk -v query="$query" -v fuzzy="$fuzzy" -v gfuzzy="$gfuzzy" '
+function emit(path) {
+  if (path in seen || total >= 15) return 0
+  seen[path] = 1; print path; total++; return 1
+}
+# Partial selection sort: emit up to limit entries, shallowest first.
+# Sort key = (depth-1)*2 for dirs, depth*2+1 for files → dirs before files
+# at the same nesting level.  O(limit * n) where n ≤ 100, so negligible.
+function emit_sorted(m, mk, n, lim,    c, i, j, mj, tmp, tk) {
+  c = 0
+  for (i = 1; i <= n && c < lim && total < 15; i++) {
+    mj = i
+    for (j = i + 1; j <= n; j++) if (mk[j] < mk[mj]) mj = j
+    if (mj != i) {
+      tmp = m[i];  m[i]  = m[mj];  m[mj]  = tmp
+      tk  = mk[i]; mk[i] = mk[mj]; mk[mj] = tk
+    }
+    if (emit(m[i])) c++
+  }
+}
+BEGIN { IGNORECASE = 1; total = 0 }
+# Pre-compute sort keys during load: dirs get (depth-1)*2, files depth*2+1
+NR == FNR { d[++nd] = $0; dd[nd] = (split($0, _, "/") - 1) * 2; next }
+{ f[++nf] = $0; fd[nf] = split($0, _, "/") * 2 + 1 }
+END {
+  t2 = "(^|/)" query
+  t3 = "(^|/)" fuzzy
+  t5 = gfuzzy
 
-{
-  # Tier 1: if query matches a dir, show it + limited children (cap 3 so
-  # matches from other repos aren't pushed out of the 15-result limit)
-  top_dir=$(grep -iE "(^|/)$query[^/]*/$" "$CACHE_DIRS" 2>/dev/null | by_depth | head -1)
-  if [ -n "$top_dir" ]; then
-    echo "$top_dir"
-    { grep -E "^${top_dir}[^/]+/$" "$CACHE_DIRS" 2>/dev/null
-      grep -E "^${top_dir}[^/]+$" "$CACHE_FILE" 2>/dev/null
-    } | head -3
-  fi
+  # Tier 1: shallowest dir matching query, then ≤3 immediate children
+  # Skip if shallowest match is deeper than 4 segments (deep dirs
+  # should not outrank shallow files like CLAUDE.md).
+  t1 = ""; t1d = 9999
+  for (i = 1; i <= nd; i++) {
+    if (d[i] ~ t2 "[^/]*/$") {
+      n = split(d[i], _, "/")
+      if (n < t1d) { t1 = d[i]; t1d = n }
+    }
+  }
+  if (t1 != "" && t1d <= 5) {
+    emit(t1); c = 0
+    for (i = 1; i <= nd && c < 3; i++) {
+      if (d[i] != t1 && index(d[i], t1) == 1) {
+        r = substr(d[i], length(t1) + 1)
+        if (r !~ /\/.*\//) { if (emit(d[i])) c++ }
+      }
+    }
+    for (i = 1; i <= nf && c < 3; i++) {
+      if (index(f[i], t1) == 1) {
+        r = substr(f[i], length(t1) + 1)
+        if (index(r, "/") == 0) { if (emit(f[i])) c++ }
+      }
+    }
+  }
 
-  # Tier 2: exact prefix match on segment
-  { grep -iE "(^|/)$query" "$CACHE_DIRS" 2>/dev/null
-    grep -iE "(^|/)$query" "$CACHE_FILE" 2>/dev/null
-  } | by_depth | head -10
+  # Tiers 2-5: collect all candidates, sort by depth, emit limit
+  # Tier 2: exact prefix on segment
+  cn = 0
+  for (i = 1; i <= nd ; i++) if (d[i] ~ t2) { cm[++cn] = d[i]; ck[cn] = dd[i] }
+  for (i = 1; i <= nf ; i++) if (f[i] ~ t2) { cm[++cn] = f[i]; ck[cn] = fd[i] }
+  emit_sorted(cm, ck, cn, 10)
 
-  # Tier 3: fuzzy match within segment
-  { grep -iE "(^|/)$fuzzy" "$CACHE_DIRS" 2>/dev/null
-    grep -iE "(^|/)$fuzzy" "$CACHE_FILE" 2>/dev/null
-  } | by_depth | head -10
+  # Tier 3: segment fuzzy
+  cn = 0
+  for (i = 1; i <= nd ; i++) if (d[i] ~ t3) { cm[++cn] = d[i]; ck[cn] = dd[i] }
+  for (i = 1; i <= nf ; i++) if (f[i] ~ t3) { cm[++cn] = f[i]; ck[cn] = fd[i] }
+  emit_sorted(cm, ck, cn, 10)
 
-  # Tier 4: substring anywhere (fallback)
-  grep -i "$query" "$CACHE_FILE" 2>/dev/null | by_depth | head -8
+  # Tier 4: substring anywhere (files only)
+  cn = 0
+  for (i = 1; i <= nf ; i++) if (f[i] ~ query) { cm[++cn] = f[i]; ck[cn] = fd[i] }
+  emit_sorted(cm, ck, cn, 8)
 
-  # Tier 5: global fuzzy across segments (e.g. "v6" matches "alcance_v0_0_6.md")
-  { grep -iE "$gfuzzy" "$CACHE_DIRS" 2>/dev/null
-    grep -iE "$gfuzzy" "$CACHE_FILE" 2>/dev/null
-  } | by_depth | head -8
-} | awk '!seen[$0]++' | head -15
+  # Tier 5: global fuzzy across segments — no per-tier cap, just fill
+  # remaining slots (earlier tiers may have produced nothing)
+  cn = 0
+  for (i = 1; i <= nd ; i++) if (d[i] ~ t5) { cm[++cn] = d[i]; ck[cn] = dd[i] }
+  for (i = 1; i <= nf ; i++) if (f[i] ~ t5) { cm[++cn] = f[i]; ck[cn] = fd[i] }
+  emit_sorted(cm, ck, cn, 15)
+}
+' "$CACHE_DIRS" "$CACHE_FILE"
