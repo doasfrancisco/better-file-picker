@@ -1,0 +1,7 @@
+{
+  "fileSuggestion": {
+    "type": "command",
+    "command": "bash \"{{SCRIPT_PATH}}\" \"{{PROJECT_ROOT}}\""
+  },
+  "respectGitignore": false
+}

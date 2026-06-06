@@ -2,6 +2,39 @@
 
 Custom `@` file picker for Claude Code that indexes meta-repos with nested git repos.
 
+## CLI (`betterpicker`)
+
+Scaffolds a meta-repo and wires up an agent's `@` file picker in one command.
+
+```bash
+uv tool install .          # install globally (betterpicker on PATH)
+betterpicker --agent claude
+```
+
+Run inside the directory you want to be the meta-repo root. It:
+
+1. Creates a `.meta-repo` marker in the current directory.
+2. Copies `file-suggestion.sh` to a stable global location, `~/.betterpicker/file-suggestion.sh` (refreshed on every run, so upgrades take effect).
+3. Writes `.claude/settings.json` pointing the file picker at that script with the current directory as the project root.
+
+The generated `.claude/settings.json`:
+
+```json
+{
+  "fileSuggestion": {
+    "type": "command",
+    "command": "bash \"C:/Users/<you>/.betterpicker/file-suggestion.sh\" \"C:/path/to/repo\""
+  },
+  "respectGitignore": false
+}
+```
+
+Notes:
+
+- `--agent` is **required** (`claude` is the only value for now; the map in `cli.py` is extensible).
+- If `.claude/settings.json` already exists, it is parsed, our keys (`fileSuggestion`, `respectGitignore`) are set, and the file is rewritten — any other keys are preserved.
+- The picker cache lives under `~/.betterpicker/cache/<project-hash>/`.
+
 ## Dependencies
 
 - `git` — file listing and sub-repo discovery
